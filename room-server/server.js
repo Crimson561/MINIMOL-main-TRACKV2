@@ -7,6 +7,6 @@ app.get("/" , (req, res) => {
 });
 
 app.listen(port , () => {
-    console.log("trying to make this express server work on ${port} port")
+    console.log(`trying to make this express server work on ${port}`)
 });
 
