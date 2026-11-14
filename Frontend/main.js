@@ -103,6 +103,9 @@ function wire(dc) {
   S.dc = dc; dc.binaryType = "arraybuffer";
   dc.onopen = () => { S.live = true; note("Peer connection established"); stage("connected"); };
   dc.onclose = () => { note("Connection interrupted"); render(); };
+  dc.onclosing = () => note("DataChannel closing");
+  dc.onerror = (e) => note("DataChannel error: " + ((e && e.error && e.error.message) || "unknown"));
+  note("DataChannel " + dc.readyState);
   dc.onmessage = (e) => onPacket(e.data);
 }
 $("createBtn").onclick = async () => {
@@ -129,6 +132,7 @@ $("clearLogBtn").onclick = () => { log.length = 0; renderLog(); };
 /* ---------- inference ---------- */
 const P = () => window.MeshProtocol;
 function onPacket(raw) {
+  if (window.meshTest && window.meshTest.handle(raw)) return;   // Stage 3: DataChannel test traffic (see dc-test.js)
   let p; try { p = P().decodePacket(raw); } catch (e) { return note("Rejected packet: " + e.message); }
   S.bytes += raw.byteLength;
   if (p.msgType === P().MSG_TYPES.ACTIVATION && S.role === "B") {            // Device B: layers 3-5 + head

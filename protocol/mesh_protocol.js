@@ -9,6 +9,7 @@
  *            0x02 = TOKEN (Phone B -> Phone A)
  *            0x03 = CONTROL (Handshake / Start / Done)
  *            0x04 = ERROR
+ *            0x05 = TENSOR (generic tensor, either direction; Stage 4)
  * 6..7   : Flags (uint16, big-endian)
  *            bit 0: is_eos (generation finished)
  * 8..15  : Session ID (uint64, 8 bytes)
@@ -20,6 +21,10 @@
  * 40..43 : Payload Byte Length (uint32)
  * 44..47 : Adler-32 Checksum (uint32)
  * 48..N  : Raw Binary Payload
+ *
+ * Byte order: header fields are big-endian (network order). The tensor payload is
+ * raw little-endian float32 (what every browser/Node target uses natively).
+ * Tensors carry at most MAX_RANK (4) dimensions; unused shape slots are zero.
  */
 
 "use strict";
@@ -32,6 +37,7 @@ const MSG_TYPES = {
   TOKEN: 0x02,
   CONTROL: 0x03,
   ERROR: 0x04,
+  TENSOR: 0x05,
 };
 
 const DATA_TYPES = {
@@ -42,6 +48,18 @@ const DATA_TYPES = {
 };
 
 const HEADER_SIZE = 48;
+
+/* ---- Stage 4: tensor serialization constants ---- */
+const MAX_RANK = 4; // the header has room for exactly 4 shape slots (bytes 24..39)
+
+// Only dtypes the inference engine really uses as tensors. The engine is Float32Array
+// everywhere (weights, activations, logits). UINT8/INT32 codes stay reserved, not supported.
+const TENSOR_DTYPES = {
+  [DATA_TYPES.FP32]: { name: "float32", bytes: 4, ctor: Float32Array },
+};
+
+// The payload is raw typed-array memory, so it is only portable between little-endian hosts.
+const IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 
 /**
  * Fast Adler-32 checksum calculation
@@ -230,6 +248,9 @@ function decodePacket(rawData) {
   const seq = view.getUint32(16, false);
   const dataType = view.getUint8(20);
   const rank = view.getUint8(21);
+  if (rank > MAX_RANK) {
+    throw new Error(`Invalid tensor rank ${rank}: header holds at most ${MAX_RANK} dimensions`);
+  }
 
   const shape = [];
   for (let i = 0; i < rank; i++) {
@@ -255,7 +276,7 @@ function decodePacket(rawData) {
     // Zero-copy Float32Array view directly over buffer
     const numFloats = payloadLength / 4;
     payload = new Float32Array(buffer, byteOffset + HEADER_SIZE, numFloats);
-  } else if (dataType === DATA_TYPES.UTF8_JSON) {
+  } else if (dataType === DATA_TYPES.UTF8_JSON && msgType !== MSG_TYPES.TENSOR) {
     const jsonBytes = new Uint8Array(buffer, byteOffset + HEADER_SIZE, payloadLength);
     const jsonStr = new TextDecoder().decode(jsonBytes);
     payload = JSON.parse(jsonStr);
@@ -279,6 +300,94 @@ function decodePacket(rawData) {
   };
 }
 
+/**
+ * Validate a shape and return its element count (product of dimensions).
+ * Rank 0 is a scalar (1 element). Any zero dimension gives an empty tensor (0 elements).
+ */
+function shapeNumel(shape) {
+  if (!Array.isArray(shape)) throw new TypeError("shape must be an array of integers");
+  if (shape.length > MAX_RANK) throw new RangeError(`Tensor rank ${shape.length} exceeds the maximum of ${MAX_RANK}`);
+  let numel = 1;
+  for (const d of shape) {
+    if (!Number.isInteger(d) || d < 0 || d > 0xffffffff) {
+      throw new RangeError(`Invalid dimension ${d}: must be an integer between 0 and 4294967295`);
+    }
+    numel *= d;
+    if (!Number.isSafeInteger(numel)) throw new RangeError("Tensor shape is too large");
+  }
+  return numel;
+}
+
+function requireLittleEndian() {
+  if (!IS_LITTLE_ENDIAN) throw new Error("Tensor payloads are little-endian; this host is big-endian and is not supported");
+}
+
+/**
+ * Serialize a tensor into one self-describing MESH packet (message type TENSOR).
+ * Reuses encodeActivation for the 48-byte header + payload layout; this adds the
+ * validation encodeActivation lacks, and tags the packet as TENSOR instead of ACTIVATION.
+ * @param {Object} params
+ * @param {Float32Array} params.data - flat, row-major elements
+ * @param {Array<number>} params.shape - 0..4 non-negative integers whose product === data.length
+ * @returns {ArrayBuffer} one contiguous packet (one copy of the data is made into it)
+ */
+function encodeTensor({ sessionId = 0, seq = 0, data, shape, flags = 0 }) {
+  requireLittleEndian();
+  if (!(data instanceof Float32Array)) {
+    const kind = data && data.constructor ? data.constructor.name : typeof data;
+    throw new TypeError(`Unsupported tensor type ${kind}: only Float32Array is supported`);
+  }
+  const numel = shapeNumel(shape);
+  if (data.length !== numel) {
+    throw new RangeError(`Shape [${shape.join(", ")}] holds ${numel} elements but data has ${data.length}`);
+  }
+  if (!Number.isInteger(seq) || seq < 0 || seq > 0xffffffff) throw new RangeError(`Invalid seq ${seq}`);
+  if (data.byteLength > 0xffffffff) throw new RangeError("Tensor payload exceeds 4 GiB");
+
+  const buffer = encodeActivation({ sessionId, seq, activations: data, shape, flags });
+  // The checksum covers only the payload, so changing the message-type byte keeps it valid.
+  new DataView(buffer).setUint8(5, MSG_TYPES.TENSOR);
+  return buffer;
+}
+
+/**
+ * Parse and validate a TENSOR packet, and rebuild the typed array.
+ * @param {ArrayBuffer|ArrayBufferView} rawData - exactly one packet
+ * @param {Object} [opts]
+ * @param {boolean} [opts.copy=false] - true forces data to own its memory. By default data
+ *   is a zero-copy view over rawData's buffer when 4-byte aligned (copied only if it is not).
+ * @returns {{data: Float32Array, shape: number[], dtype: string, numel: number, sessionId: string, seq: number, flags: number}}
+ */
+function decodeTensor(rawData, { copy = false } = {}) {
+  requireLittleEndian();
+  const p = decodePacket(rawData); // magic, version, rank, truncation, payload checksum
+  if (p.msgType !== MSG_TYPES.TENSOR) {
+    throw new Error(`Not a tensor packet: message type 0x${p.msgType.toString(16).padStart(2, "0")}`);
+  }
+  const dt = TENSOR_DTYPES[p.dataType];
+  if (!dt) throw new Error(`Unsupported tensor dtype code 0x${p.dataType.toString(16).padStart(2, "0")}`);
+
+  const numel = shapeNumel(p.shape);
+  const expected = numel * dt.bytes;
+  if (p.payloadLength !== expected) {
+    throw new Error(`Payload length mismatch: shape [${p.shape.join(", ")}] of ${dt.name} needs ${expected} bytes, header says ${p.payloadLength}`);
+  }
+  if (rawData.byteLength !== HEADER_SIZE + p.payloadLength) {
+    throw new Error(`Packet size mismatch: expected ${HEADER_SIZE + p.payloadLength} bytes, got ${rawData.byteLength}`);
+  }
+
+  const bytes = p.payload; // Uint8Array view over the payload bytes (no copy yet)
+  let data;
+  if (!copy && bytes.byteOffset % dt.bytes === 0) {
+    data = new dt.ctor(bytes.buffer, bytes.byteOffset, numel); // zero-copy view
+  } else {
+    const owned = new Uint8Array(bytes.byteLength); // fresh, aligned buffer
+    owned.set(bytes);
+    data = new dt.ctor(owned.buffer, 0, numel);
+  }
+  return { data, shape: p.shape, dtype: dt.name, numel, sessionId: p.sessionId, seq: p.seq, flags: p.flags };
+}
+
 // Export for Node and Browser environments
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
@@ -292,6 +401,11 @@ if (typeof module !== "undefined" && module.exports) {
     encodeToken,
     encodeControl,
     decodePacket,
+    MAX_RANK,
+    TENSOR_DTYPES,
+    shapeNumel,
+    encodeTensor,
+    decodeTensor,
   };
 } else if (typeof window !== "undefined") {
   window.MeshProtocol = {
@@ -305,5 +419,10 @@ if (typeof module !== "undefined" && module.exports) {
     encodeToken,
     encodeControl,
     decodePacket,
+    MAX_RANK,
+    TENSOR_DTYPES,
+    shapeNumel,
+    encodeTensor,
+    decodeTensor,
   };
 }
