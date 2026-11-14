@@ -12,6 +12,7 @@
 
         socket.on("connect", () => {
             console.log(`konsi id se connected ho :`,socket.id)
+            socket.emit("ping-server" , "Hello form test-server");
         })
 
     </script>

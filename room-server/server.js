@@ -22,8 +22,8 @@ io.on("connection", (socket) => {
 socket.on("ping-server", (data) => {
   console.log(`ping server recieve hogya!! `, data);
 
-    socket.emit("server-reply" , {
-    message: "server is ALIVEE!!" , 
+    socket.broadcast.emit("server-reply" , {
+    message: data , 
     timestamp: Date.now()
   });
 });

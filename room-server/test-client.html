@@ -13,8 +13,6 @@
         const socket = io("http://localhost:3000");
         socket.on("server-reply" , (data) => {
             console.log(`serve ne kya bheja hai:`,data)
-            
-            socket.emit("ping-server" , "Hello from browser!!");
         });
         
 
