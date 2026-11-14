@@ -14,7 +14,11 @@
         socket.on("server-reply" , (data) => {
             console.log(`serve ne kya bheja hai:`,data)
         });
-        
+        socket.on("connect" , () =>{
+            console.log(`client connected:`, socket.id);
+
+            socket.emit("join-room" , "socket-room-1");
+        });
 
     </script>
 </body>

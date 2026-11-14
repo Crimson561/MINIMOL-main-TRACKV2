@@ -13,6 +13,8 @@
         socket.on("connect", () => {
             console.log(`konsi id se connected ho :`,socket.id)
             socket.emit("ping-server" , "Hello form test-server");
+
+            socket.emit("join-room" , "socket-room-1")
         })
 
     </script>
