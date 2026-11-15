@@ -11,7 +11,8 @@ const app = express()
 app.use(express.static(path.join(__dirname, "../Frontend")));
 app.use("/protocol", express.static(path.join(__dirname, "../protocol")));
 app.use("/engine", express.static(path.join(__dirname, "../engine")));
-app.use("/weights", express.static(path.join(__dirname, "public/weight  s")));
+app.use("/weights", express.static(path.join(__dirname, "public/weights")));
+app.use("/fixtures", express.static(path.join(__dirname, "../tests/fixtures")));   // Stage 5: PyTorch reference data for the browser check
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "../Frontend/main.html"));
 });
@@ -100,8 +101,17 @@ socket.on("ping-server", (data) => {
     const room = roomCode && rooms.get(roomCode);
     if (!room) return;
     room.delete(socket.id);
-    if (room.size === 0) rooms.delete(roomCode);        // empty room: forget the code
     console.log(`${socket.id} left room ${roomCode}`);
+    // Stage 6: a room is one two-device session. When a member leaves, tell whoever is still inside, then close the room
+    // (forget the code, release the remaining sockets) so a stale half-empty room cannot be joined by a third device.
+    if (room.size > 0) {
+      io.to(roomCode).emit("peer-left", { peerId: socket.id });
+      for (const id of room) {
+        const other = io.sockets.sockets.get(id);
+        if (other) { other.leave(roomCode); other.data.roomCode = undefined; }
+      }
+    }
+    rooms.delete(roomCode);
   });
 
 });
