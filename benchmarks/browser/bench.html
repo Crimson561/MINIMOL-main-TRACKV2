@@ -1,0 +1,141 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MINIMOL Stage 7 browser benchmark</title>
+<!-- Evidence level: ONE browser page, TWO RTCPeerConnections, real RTCDataChannel over loopback ICE. Same machine: no physical network. -->
+<script src="/protocol/mesh_protocol.js"></script>
+<pre id="log">loading...</pre>
+<script>
+const params = new URLSearchParams(location.search);
+const ENGINE = params.get("engine") === "baseline" ? "/baseline/inference_engine.baseline.js" : "/engine/inference_engine.js";
+const CFG = { warmup: +(params.get("warmup") || 2), iters: +(params.get("iters") || 8), bufferHigh: 1048576, bufferLow: 262144, rawReps: +(params.get("rawReps") || 15) };
+const now = () => performance.now();
+const log = (m) => { document.getElementById("log").textContent += "\n" + m; };
+const P = () => window.MeshProtocol;
+function loadScript(src) { return new Promise((ok, no) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = () => no(new Error("failed " + src)); document.head.appendChild(s); }); }
+const fixedTokens = (T) => Array.from({ length: T }, (_, i) => (i * 37 + 11) & 255);
+
+async function makeChannel() {
+  const a = new RTCPeerConnection({ iceServers: [] }), b = new RTCPeerConnection({ iceServers: [] });
+  a.onicecandidate = (e) => e.candidate && b.addIceCandidate(e.candidate); b.onicecandidate = (e) => e.candidate && a.addIceCandidate(e.candidate);
+  const chA = a.createDataChannel("minimol", {}); chA.binaryType = "arraybuffer"; chA.bufferedAmountLowThreshold = CFG.bufferLow;
+  const chBp = new Promise((ok) => { b.ondatachannel = (e) => { e.channel.binaryType = "arraybuffer"; e.channel.bufferedAmountLowThreshold = CFG.bufferLow; ok(e.channel); }; });
+  const offer = await a.createOffer(); await a.setLocalDescription(offer); await b.setRemoteDescription(offer);
+  const ans = await b.createAnswer(); await b.setLocalDescription(ans); await a.setRemoteDescription(ans);
+  await new Promise((ok) => { if (chA.readyState === "open") ok(); else chA.onopen = ok; });
+  const chB = await chBp;
+  return { a, b, chA, chB, maxMessage: a.sctp ? a.sctp.maxMessageSize : null };
+}
+function transport(ch, maxMessage) {   // same logic as Frontend/main.js makeTransport(): negotiated limit, backpressure at bufferHigh
+  const waitLow = () => new Promise((ok) => ch.addEventListener("bufferedamountlow", ok, { once: true }));
+  return { maxMessageSize: () => (Number.isFinite(maxMessage) && maxMessage >= 256 ? Math.floor(maxMessage) : 65536),
+    async send(data) {
+      if (ch.readyState === "connecting") await new Promise((ok) => ch.addEventListener("open", ok, { once: true }));   // as Frontend/main.js makeTransport(): a remote channel can still be "connecting" when B first sends
+      while (ch.bufferedAmount > CFG.bufferHigh) await waitLow(); ch.send(data); } };
+}
+
+async function rawChannelBench(link) {
+  // Throughput / latency of the channel alone, using the real chunker for messages above the negotiated limit.
+  const out = { negotiatedMaxMessageSize: link.maxMessage, pingPong: null, transfers: [] };
+  const chA = link.a.createDataChannel("raw"); chA.binaryType = "arraybuffer"; chA.bufferedAmountLowThreshold = CFG.bufferLow;
+  const chBp = new Promise((ok) => { const prev = link.b.ondatachannel; link.b.ondatachannel = (e) => { if (e.channel.label === "raw") { e.channel.binaryType = "arraybuffer"; ok(e.channel); } else prev(e); }; });
+  await new Promise((ok) => (chA.readyState === "open" ? ok() : (chA.onopen = ok))); const chB = await chBp;
+  const tr = transport(chA, link.maxMessage);
+  // ping-pong: A sends 1 byte, B echoes. One-way latency is NOT directly observable; RTT/2 is an approximation.
+  chB.onmessage = (e) => { if (e.data.byteLength === 1) chB.send(e.data); };
+  const rtts = []; for (let i = 0; i < 60; i++) { const t = now(); await new Promise((ok) => { chA.onmessage = ok; chA.send(new Uint8Array(1)); }); if (i >= 10) rtts.push(now() - t); }
+  out.pingPong = { rttMs: rtts };
+  // one-way bulk transfers: B timestamps arrival of the last frame; same clock as A's send start (same page)
+  for (const bytes of [1024, 12336, 53808, 196656, 786480, 4194304]) {
+    const times = []; const frames = [];
+    for (let rep = 0; rep < CFG.rawReps + 3; rep++) {
+      const payload = new Uint8Array(bytes); const pkt = payload.buffer;
+      const fs = bytes > tr.maxMessageSize() ? P().splitIntoChunks(pkt, tr.maxMessageSize(), rep + 1) : [pkt];
+      let got = 0; const done = new Promise((ok) => { chB.onmessage = (e) => { got += e.data.byteLength; if (got >= fs.reduce((s, f) => s + f.byteLength, 0)) ok(now()); }; });
+      const t0 = now(); for (const f of fs) await tr.send(f); const tEnd = await done;
+      if (rep >= 3) { times.push(tEnd - t0); frames.length || frames.push(fs.length); }
+    }
+    out.transfers.push({ bytes, frames: frames[0], timesMs: times });
+  }
+  chA.close(); chB.close();
+  return out;
+}
+
+async function distributedRig(model) {
+  const link = await makeChannel(); const tA = transport(link.chA, link.maxMessage), tB = transport(link.chB, link.maxMessage);
+  const pipeA = new MeshPipeline.PipelineA({ engine: model.partitionA, fingerprint: model.fingerprint, transport: tA, timeoutMs: 120000 });
+  const pipeB = new MeshPipeline.PipelineB({ engine: model.partitionB, fingerprint: model.fingerprint, transport: tB, timeoutMs: 120000 });
+  const mark = { recvB: 0, recvA: 0 };
+  link.chB.onmessage = (e) => { mark.recvB = now(); pipeB.handleMessage(e.data); };
+  link.chA.onmessage = (e) => { mark.recvA = now(); pipeA.handleMessage(e.data); };
+  try { await pipeA.sendHello(); await pipeB.sendHello(); await pipeA.waitReady(15000); await pipeB.waitReady(15000); }
+  catch (e) { const info = { message: String(e && e.message || e), chA: link.chA.readyState, chB: link.chB.readyState, pcA: link.a.connectionState, pcB: link.b.connectionState, peerA: pipeA.peer && pipeA.peer.reason, peerB: pipeB.peer && pipeB.peer.reason }; pipeA.dispose("setup failed"); pipeB.dispose("setup failed"); link.a.close(); link.b.close(); throw Object.assign(new Error("rig setup failed"), { info }); }
+  // timestamps on ONE clock, collected with wrappers (restored in dispose)
+  const T = {}; const restore = [];
+  const wrap = (o, k, f) => { const orig = o[k]; restore.push(() => (o[k] = orig)); o[k] = f(orig); };
+  wrap(model.partitionA, "forward", (orig) => function (...a) { T.aStart = now(); try { return orig.apply(this, a); } finally { T.aEnd = now(); } });
+  wrap(model.partitionB, "forward", (orig) => function (...a) { T.bStart = now(); try { return orig.apply(this, a); } finally { T.bEnd = now(); } });
+  wrap(P(), "encodeActivation", (orig) => function (...a) { const t = now(); try { return orig.apply(this, a); } finally { T.serEnd = now(); T.serMs = T.serEnd - t; } });
+  wrap(P(), "splitIntoChunks", (orig) => function (pkt, ...r) { const t = now(); try { return orig.call(this, pkt, ...r); } finally { if (new Uint8Array(pkt)[5] === P().MSG_TYPES.ACTIVATION) { T.chunkEnd = now(); T.chunkMs = T.chunkEnd - t; } } });
+  wrap(tB, "send", (orig) => function (d) { if (T.bReplyFirstSend === undefined) { T.bReplyFirstSend = now(); T.lastRecvB = mark.recvB; } return orig.call(this, d); });
+  wrap(tA, "send", (orig) => function (d) { if (T.aFirstSend === undefined) T.aFirstSend = now(); return orig.call(this, d); });
+  return { pipeA, pipeB, link, T, mark, dispose() { restore.reverse().forEach((f) => f()); pipeA.dispose("done"); pipeB.dispose("done"); link.a.close(); link.b.close(); } };
+}
+async function request(rig, tokens) {
+  const { T, mark } = rig; for (const k of Object.keys(T)) delete T[k];
+  const t0 = now(); const r = await rig.pipeA.infer(tokens); const t7 = now();
+  const tA = rig.pipeA; const recvA = mark.recvA;
+  // disjoint intervals along ONE timeline: t0 -> aCompute -> serialize -> chunk -> [A->B wire] -> B processing -> [B->A wire] -> A finish
+  const aCompute = T.aEnd - T.aStart, aPre = T.aStart - t0;
+  const serialize = T.serMs, chunk = T.chunkMs;
+  const gapBeforeSend = T.aFirstSend - T.chunkEnd;                  // pipeline bookkeeping between chunking and the first send call
+  const wireAB = T.lastRecvB - T.aFirstSend;                        // first dc.send call -> last frame handed to B's handler
+  const bProc = T.bReplyFirstSend - T.lastRecvB, bCompute = T.bEnd - T.bStart;
+  const wireBA = recvA - T.bReplyFirstSend;                         // B's reply first send call -> A's handler
+  const aFinish = t7 - recvA;
+  const parts = { aPre, aCompute, serialize, chunk, gapGlue: (T.chunkEnd - T.aEnd) - serialize - chunk, gapBeforeSend, wireAB, bProcNonCompute: bProc - bCompute, bCompute, wireBA, aFinish };   // bProc is split into its two disjoint pieces: never add bProc AND bCompute
+  const sum = Object.values(parts).reduce((s, x) => s + x, 0);
+  return { totalMs: t7 - t0, ...parts, attributedSum: sum, residual: (t7 - t0) - sum, frames: r.frames, activationPacketBytes: r.activationBytes, token: r.token };
+}
+
+(async () => {
+  const result = { engine: ENGINE, userAgent: navigator.userAgent, hardwareConcurrency: navigator.hardwareConcurrency, deviceMemoryGB: navigator.deviceMemory || null, config: CFG };
+  try {
+    await loadScript(ENGINE); await loadScript("/engine/mesh_pipeline.js");   // pipeline is loaded after the engine so root.MeshInference exists
+    const E = window.MeshInference, Pl = window.MeshPipeline;
+    log("fetching weights...");
+    const manifest = await (await fetch("/weights/weights_manifest.json")).json();
+    const buf = async (n) => (await fetch("/weights/" + n)).arrayBuffer();
+    const [bA, bB, bF] = await Promise.all([buf("partition_a.bin"), buf("partition_b.bin"), buf("full_model.bin")]);
+    Pl.verifyPartitionBuffer(bA, manifest, "a"); Pl.verifyPartitionBuffer(bB, manifest, "b");
+    const model = { manifest, fingerprint: Pl.modelFingerprint(manifest), partitionA: E.MeshPartitionA.fromBuffer(bA, manifest), partitionB: E.MeshPartitionB.fromBuffer(bB, manifest), full: E.MeshFullModel.fromBuffer(bF, manifest) };
+    result.memoryBeforeMB = performance.memory ? { usedJSHeap: performance.memory.usedJSHeapSize / 1048576, totalJSHeap: performance.memory.totalJSHeapSize / 1048576 } : null;
+    log("raw DataChannel benchmark...");
+    const link0 = await makeChannel(); result.rawChannel = await rawChannelBench(link0); link0.a.close(); link0.b.close();
+    result.workloads = []; const errors = [];
+    for (const w of [{ id: "fwd8", T: 8 }, { id: "fwd35", T: 35 }, { id: "fwd128", T: 128 }, { id: "gen", gen: true }]) {
+      log("workload " + w.id);
+      const wl = { id: w.id, local: [], distributed: [], rows: [], errors: [] };
+      const tokens = w.gen ? null : fixedTokens(w.T); const expected = w.gen ? null : model.full.forward(tokens).nextByte;
+      let rig = null;
+      for (let attempt = 1; attempt <= 3 && !rig; attempt++) { try { rig = await distributedRig(model); } catch (e) { (result.setupFailures = result.setupFailures || []).push({ workload: w.id, attempt, info: e.info || String(e) }); } }
+      if (!rig) throw new Error("could not establish the DataChannel pipeline for workload " + w.id + " after 3 attempts");
+      try {
+        for (let i = 0; i < CFG.warmup + CFG.iters; i++) {
+          const measured = i >= CFG.warmup; const order = i % 2 ? ["d", "l"] : ["l", "d"];   // alternate which mode goes first
+          for (const m of order) {
+            try {
+              if (m === "l") { const t = now(); if (w.gen) { const tk = [77, 69, 83, 72]; for (let k = 0; k < 10; k++) tk.push(model.full.forward(tk).nextByte); if (measured) wl.local.push(now() - t); wl.lastLocalGen = tk.join(); } else { const r = model.full.forward(tokens); const ms = now() - t; if (r.nextByte !== expected) throw new Error("local token mismatch"); if (measured) wl.local.push(ms); } }
+              else if (w.gen) { const tk = [77, 69, 83, 72]; const t = now(); const rows = []; for (let k = 0; k < 10; k++) { const r = await request(rig, tk); rows.push(r); tk.push(r.token); } const ms = now() - t; if (tk.join() !== wl.lastLocalGen && wl.lastLocalGen) throw new Error("distributed generation differs from local generation"); if (measured) { wl.distributed.push(ms); wl.rows.push({ totalMs: ms, requests: rows.length, wireAB: rows.reduce((s, r) => s + r.wireAB, 0), wireBA: rows.reduce((s, r) => s + r.wireBA, 0), compute: rows.reduce((s, r) => s + r.aCompute + r.bCompute, 0), residual: rows.reduce((s, r) => s + r.residual, 0) }); } }
+              else { const r = await request(rig, tokens); if (r.token !== expected) throw new Error("distributed token mismatch"); if (measured) { wl.distributed.push(r.totalMs); wl.rows.push(r); } }
+            } catch (e) { if (measured) wl.errors.push({ mode: m, message: String(e && e.message || e), code: e && e.code || null }); else throw e; }
+          }
+        }
+      } finally { rig.dispose(); }
+      result.workloads.push(wl);
+    }
+    result.memoryAfterMB = performance.memory ? { usedJSHeap: performance.memory.usedJSHeapSize / 1048576, totalJSHeap: performance.memory.totalJSHeapSize / 1048576 } : null;
+    result.ok = true;
+  } catch (e) { result.ok = false; result.fatal = String(e && e.stack || e); }
+  window.__result = result; window.__done = true; log("done");
+})();
+</script>

@@ -28,16 +28,37 @@ const SQRT_2_OVER_PI = Math.sqrt(2.0 / Math.PI);
  * C: [M, N]
  */
 function matmulTransposeB(A, B, bias, M, K, N, out) {
+  // Stage 7 (optimization 1): register blocking. Compute a 2 (rows) x 4 (columns) tile per pass, so every loaded A[k] is used for
+  // 4 outputs and every loaded B[k] for 2 outputs. Each output still starts from bias[n] and adds products for k = 0..K-1 in the
+  // same order in double precision, so results are bit-identical to the naive triple loop (verified in tests/test_stage7_benchmarks.js).
   const result = out || new Float32Array(M * N);
-  for (let m = 0; m < M; m++) {
-    const aOffset = m * K;
-    const cOffset = m * N;
-    for (let n = 0; n < N; n++) {
+  const N4 = N - (N % 4);
+  const M2 = M - (M % 2);
+  let m = 0;
+  for (; m < M2; m += 2) {
+    const a0 = m * K, a1 = a0 + K, c0 = m * N, c1 = c0 + N;
+    for (let n = 0; n < N4; n += 4) {
+      const b0 = n * K, b1 = b0 + K, b2 = b1 + K, b3 = b2 + K;
+      const i0 = bias ? bias[n] : 0.0, i1 = bias ? bias[n + 1] : 0.0, i2 = bias ? bias[n + 2] : 0.0, i3 = bias ? bias[n + 3] : 0.0;
+      let p0 = i0, p1 = i1, p2 = i2, p3 = i3, q0 = i0, q1 = i1, q2 = i2, q3 = i3;
+      for (let k = 0; k < K; k++) {
+        const x = A[a0 + k], y = A[a1 + k];
+        const w0 = B[b0 + k], w1 = B[b1 + k], w2 = B[b2 + k], w3 = B[b3 + k];
+        p0 += x * w0; p1 += x * w1; p2 += x * w2; p3 += x * w3;
+        q0 += y * w0; q1 += y * w1; q2 += y * w2; q3 += y * w3;
+      }
+      result[c0 + n] = p0; result[c0 + n + 1] = p1; result[c0 + n + 2] = p2; result[c0 + n + 3] = p3;
+      result[c1 + n] = q0; result[c1 + n + 1] = q1; result[c1 + n + 2] = q2; result[c1 + n + 3] = q3;
+    }
+  }
+  // Edges: leftover columns (N % 4) for the paired rows, then any leftover single row. Plain loop, same summation order.
+  for (let r = 0; r < M; r++) {
+    const aOffset = r * K, cOffset = r * N;
+    const nStart = r < M2 ? N4 : 0;
+    for (let n = nStart; n < N; n++) {
       const bOffset = n * K;
       let sum = bias ? bias[n] : 0.0;
-      for (let k = 0; k < K; k++) {
-        sum += A[aOffset + k] * B[bOffset + k];
-      }
+      for (let k = 0; k < K; k++) sum += A[aOffset + k] * B[bOffset + k];
       result[cOffset + n] = sum;
     }
   }
