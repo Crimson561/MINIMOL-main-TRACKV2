@@ -24,11 +24,11 @@ If B fails (firewall, Wi-Fi client isolation, NAT), film A and say plainly that 
 ## 2. Live demonstration steps (1:15–3:00)
 
 1. Terminal: `cd room-server && npm start`. Point at the "listening" line.
-2. Window 1 → **Find my other half** → **Create room**. Read the `MESH-XXXXX` code aloud. (Mention: MESH was the protocol's working name.)
+2. Window 1 → **Find my other half** → **Create room**. The `MESH-XXXXX` code is shown on screen (with a Copy button); read it aloud. (Mention: MESH was the protocol's working name.)
 3. Window 2 → **Find my other half** → enter the code → **Join room**.
 4. Wait while each side downloads *its own* half of the weights. Say: each device fetches only its partition (22.5 MB and 21.7 MB), verified against checksums.
-5. Show that both sides report a live session, then **Enter workspace →**.
-6. In Device A: prompt `MESH`, **Run inference**. Show the output and the timing panel (A compute, B compute, round trip).
+5. Both sides show **IT'S A MATCH.**; click **Enter workspace →** on each.
+6. In Device A open the **Inference** tab (the workspace opens on Overview), enter the prompt `MESH`, **Run inference**. Show the output and the timing panel (A compute, B compute, round trip).
 7. Say what the output is: random-weight text, deterministic, not meaningful.
 8. (Optional, 20 s, strong evidence) Close Window 2 mid-run or reload it. Show Device A leaving the live state and reporting a reason instead of hanging.
 

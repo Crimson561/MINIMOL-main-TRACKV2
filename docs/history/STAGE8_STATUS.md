@@ -1,13 +1,15 @@
 # MINIMOL — Stage 8 Status (documentation, portfolio preparation, showcase)
 
-Audit and validation date: 2026-11-17. Environment: Linux x86-64, 1 core, Node 22.23.4, Python 3.12.3, torch 2.15.0, numpy 2.5.4, Chromium **not available**.
+Audit and validation date: 2026-11-17. Environment: Linux x86-64, 1 core, Node 22.23.4, Python 3.12.3, torch 2.15.0, numpy 2.5.4, Playwright Chromium (headless).
 **Nothing has been committed or published.** All changes are in the working tree for you to review.
+
+> **Correction (same day, after you reported the project "still not working as a whole").** My first version of this report called the project verified. That was too strong: I had only run Node simulations and the signalling test, and I had not run the app in a browser. Running it properly found a real bug that made the app unusable as a pair of devices (see §2, rows 20–23). Sections 1, 2, 4, 9 and 12 below are updated.
 
 ## 1. Verdict in three lines
 
-- **Reproducible:** from a clean copy of only the files git would publish, INSTALLATION.md was followed and every test passed (details in §4).
-- **Technically defensible:** the documents now match the code, and every claim carries an evidence level.
-- **Not yet proven:** physical devices, other browsers, real networks. The docs say so everywhere. Do not claim these until you have run the checklist in TESTING.md §7.
+- **Works end to end in a real browser on one machine:** two headless Chromium pages create a room, join, download and verify their halves, open a WebRTC DataChannel, and generate bytes through both partitions, driven through the visible UI (13-check test) and also from a non-secure `http://<ip>` origin. **Not yet shown on two physical devices.**
+- **The generated text is meaningless** (random weights). It was always so, but the UI did not say it, which made a working pipeline look broken. It does now.
+- **Reproducible and documented,** with claims labelled by evidence level; the docs previously skipped the **Inference** tab, now fixed.
 
 ## 2. What the audit found and what was done
 
@@ -32,6 +34,11 @@ Audit and validation date: 2026-11-17. Environment: Linux x86-64, 1 core, Node 2
 | 17 | Stale/unused files | Deleted (approved): root `main.html`/`main.css` (outdated duplicates, not served), `satic/main.py` (unrelated Flask scratch), `room-server/test-client.html`/`test-server.html` (no longer compatible with join validation), `model/__pycache__/*.pyc`, `benchmarks/results/profiles/*.cpuprofile` (embedded local paths; regenerable), `benchmarks/STAGE7_PROGRESS.md` (superseded) |
 | 18 | Stage 5–7 reports address you personally | Moved to `docs/history/` |
 | 19 | Comment-only brand fixes ("MESH" → "MINIMOL" in docstrings) | Wire identifiers (`"MESH"` magic bytes, `MESH-` room codes, `MeshPipeline`, channel label) deliberately left alone: renaming would change the protocol |
+| 20 | **The room code was never visible to the host.** `stage()` in `Frontend/main.js` hid the whole `#panes` container while connecting, and the code box lives inside it, so after **Create room** the screen only said "Waiting for another device…". The host had nothing to tell the other device. This is present in the original frontend commit and in HEAD, so it is older than Stage 8. The Stage 6 browser test could not see it because it reads `#codeOut`'s text, which exists even when hidden | Fixed: while waiting as host the code and Copy button stay visible and the Create/Join controls are hidden |
+| 21 | No test clicked only what a user can see | New `tests/browser/ui_user_flow.js` (13 checks). Mutation-checked: with the old behaviour restored it fails on exactly the two code-visibility checks |
+| 22 | Output is random bytes (including unprintable characters) and nothing in the UI said why | Added an "untrained weights" note and a truthful placeholder on the Inference tab |
+| 23 | Docs omitted that the workspace opens on **Overview** and the prompt is on the **Inference** tab | README, DEMO_SCRIPT and TESTING corrected |
+| 9b | The Copy fallback from row 9 did not trigger when the clipboard API existed but was refused (headless: "Copy failed") | Now falls back to `execCommand` in both cases; checked from `localhost` and from a non-secure `http://<ip>` origin ("Copied") |
 
 **Left alone on purpose:** `Frontend/dc-test.js` and `Frontend/stage5-test.js` are loaded by the real page; they are console diagnostics (`meshTest`, `meshStage5`), useful for physical-device evidence, so they stay and are documented. `/fixtures` is served publicly by the dev server (test data only). No benchmark result file was modified. No test was removed or weakened. No model, protocol, WebRTC or Socket.IO change.
 
@@ -74,14 +81,16 @@ The publishable tree is 76 files and about 1.8 MB (the largest file is the 797 K
 | 6 Mermaid diagrams in ARCHITECTURE.md | Parse with the real Mermaid parser (found and fixed one syntax error). **Parsed, not visually rendered**: check them on GitHub |
 | Secret / key / email / absolute-path scan of publishable files | Nothing found (the only identity in files is the handle in `LICENSE`) |
 | Missing-weights, port-in-use and missing-Chrome messages | Each confirmed to print the intended message |
+| `tests/browser/stage6_two_page.js` | 21 passed, 0 failed (headless Chromium, one machine; re-run after the `main.js` changes) |
+| `tests/browser/ui_user_flow.js` (new) | 13 passed, 0 failed |
+| Real UI flow from `http://192.0.2.2:3000` (non-secure context, same machine) | Connected, both INFERENCE_READY in ~0.9 s, generation Done at ~7.8 tokens/s, Copy button works |
 
 **Not verified in Stage 8:**
 
 | Item | Why |
 |---|---|
-| `tests/browser/stage6_two_page.js` (21 checks) and in-page `meshStage5.validate()` (27 of 27) | Need Chromium + Playwright, unavailable here; **reported by Stages 5/6, not re-run** |
-| Browser benchmark (`bench_browser.js`) | Same |
-| The new "Copy code" fallback | Never run in a browser |
+| In-page `meshStage5.validate()` (27 of 27) | Reported in Stage 5, not re-run |
+| Browser benchmark (`bench_browser.js`) | Not re-run |
 | Two physical devices, Firefox, Safari, mobile, different networks, TURN, plain-http on a phone | Never run by anyone |
 | The CPU-only PyTorch install command in INSTALLATION.md | Index not reachable from here (the CUDA wheel route was tested) |
 | Node versions other than 22, Windows/macOS | Not run (`engines` says `>=18`, which is an expectation) |
@@ -121,7 +130,7 @@ Untrained random weights (meaningless text) · same-machine testing only · no T
 3. **LICENSE** is MIT, copyright "2026 PratyushK0_0" (confirm that is the name you want shown). MIT permits anyone to use, modify and sell the code provided the notice is kept, with no warranty.
 4. **Replace `<your-repository-url>`** in README.md and INSTALLATION.md.
 5. **Physical-device test** (TESTING.md §7) and, if it works, record the real result in TESTING.md/BENCHMARKS.md under a "physical device" label. Until then say "two browser instances on one machine".
-6. **Run the browser test once on your machine** (`tests/browser/stage6_two_page.js`, TESTING.md §5) and try the Copy button in a normal browser, to turn two "reported/untested" items into verified ones.
+6. **Run the two browser tests once on your own machine** (TESTING.md §5) and click through the app yourself in a normal (non-headless) browser: headless Chromium on Linux is not the same as your setup.
 7. **Screenshots:** none exist. Capture the connected state and an output with metrics during your dry run and add them to the README.
 8. Look at the Mermaid diagrams on GitHub after pushing.
 9. Optional later: a CI workflow running the Node tests (needs weights generated in CI), and a root `package.json` with scripts.
@@ -142,8 +151,8 @@ Choose variant A (two windows, one computer) or B (physical devices, only if tes
 | Dimension | Assessment |
 |---|---|
 | **Reproducibility** | **Strong.** Verified from a clean copy of the publishable files; deterministic weights proven by a byte-identical fixture |
-| **Documentation accuracy** | **Strong.** Claims are labelled by evidence level; several of my own draft claims were caught and corrected against the code (session IDs are time-based not random, the ICE config location, a wrong troubleshooting row) |
-| **Test coverage** | **Good** for logic, protocol, pipeline and signalling; **gap** in real-browser re-verification (reported, not re-run in Stage 8) and no CI |
+| **Documentation accuracy** | **Good, with a lesson.** Claims are labelled by evidence level; several of my own draft claims were caught and corrected against the code (session IDs are time-based not random, the ICE config location, a wrong troubleshooting row) |
+| **Test coverage** | **Good** for logic, protocol, pipeline, signalling and the full UI journey in headless Chromium; **gaps:** no CI, no non-Chromium browsers, only one machine |
 | **Benchmark honesty** | **Strong.** Statistical method, noise floor, a reverted optimisation and a non-reproducing result are all documented |
 | **Physical-device evidence** | **None.** This is the largest gap between "works" and "demonstrated" |
 | **Publication readiness** | **Ready once you commit** (§9.1–9.4). The current HEAD alone is not publishable |

@@ -31,7 +31,8 @@ Large models do not always fit on one device. A *pipeline split* puts the first 
 | Model partitioning (A: embeddings + blocks 0–2, B: blocks 3–5 + head) | ✅ Implemented | split == full model, bit-identical (PyTorch and JS) |
 | Distributed transformer inference in plain JavaScript | ✅ Implemented | matches PyTorch within 1.1e-6 (tolerance 1e-5) |
 | Weight verification and model fingerprint handshake | ✅ Implemented | Adler-32 (accident detection, **not** security) |
-| Failure handling: timeouts, duplicate/stale replies, `dispose()`, bounded reconnect | ✅ Implemented | 24 simulation checks + 21 scripted browser checks (Stage 6 report) |
+| Failure handling: timeouts, duplicate/stale replies, `dispose()`, bounded reconnect | ✅ Implemented | 24 simulation checks + 21 scripted browser checks (re-run in Stage 8) |
+| Full user flow in the real UI (create, join, enter, generate) | ✅ Implemented | 13-check browser test driving visible controls; also run from a non-secure `http://<ip>` origin |
 | Performance benchmark harness with statistics and before/after optimisation | ✅ Implemented | [BENCHMARKS.md](BENCHMARKS.md) |
 | "Dev demo mode" button in the UI | ⚠️ Dev aid only | Prints canned text, labelled as fake in the UI. Never use it to demonstrate inference |
 | Two physical devices on a real network | ❓ **Not tested** | checklist in [TESTING.md](TESTING.md#7-physical-device-checklist-not-yet-run) |
@@ -95,9 +96,9 @@ cd room-server && npm install && npm start            # http://localhost:3000
 
 1. **Start the server** (`cd room-server && npm start`). It prints `MINIMOL room server listening on http://0.0.0.0:3000`.
 2. **Open the app** at `http://localhost:3000` in two tabs (or `http://<LAN-IP>:3000` on two devices; see the caveats in INSTALLATION.md).
-3. **Create or join a room.** On both pages click **Find my other half**. On the first (Device A, the host) click **Create room** and note the `MESH-XXXXX` code (`MESH` is the wire protocol's original working name). On the second (Device B) enter the code and click **Join room**.
-4. **Connection and partition loading** happen automatically: each device downloads and verifies *only its own* partition, the WebRTC connection is negotiated, and the two devices exchange a model-fingerprint handshake. Wait for the status to show the live session as ready, then click **Enter workspace →**.
-5. **Run distributed inference** from **Device A** (inference starts on the host): type a prompt and click **Run inference**. Expect a few bytes of nonsense output (untrained weights) with per-token timing for A, B and the round trip.
+3. **Create or join a room.** On both pages click **Find my other half**. On the first (Device A, the host) click **Create room**: the `MESH-XXXXX` code appears on screen (`MESH` is the wire protocol's original working name) with a **Copy code** button; read it out or send it to the other device. On the second (Device B) type the code and click **Join room**.
+4. **Connection and partition loading** happen automatically: each device downloads and verifies *only its own* partition, the WebRTC connection is negotiated, and the two devices exchange a model-fingerprint handshake. Both screens then show **IT'S A MATCH.**; click **Enter workspace →** on each (in the headless-Chromium run this took under a second on one machine).
+5. **Run distributed inference from Device A:** in the workspace open the **Inference** tab (the workspace opens on *Overview*), type a few characters (for example `MESH`) and click **Run inference**. The status changes to *Done* and a counter, timing metrics and the output appear. **The output will look like random bytes, including unprintable characters: the weights are untrained, and the UI says so.**
 6. If the link drops, the app reconnects up to twice and otherwise shows `FAILED` with a reason and a **Try again** button.
 
 Do not use "Open workspace in dev demo mode" to show inference: it never contacts a peer and prints canned text.
@@ -116,7 +117,7 @@ node tests/test_stage7_benchmarks.js                  # 46 checks
 (cd room-server && npm test)                          # 15 checks, starts its own server
 ```
 
-All of the above passed in the Stage 8 audit (Linux, Node 22, Python 3.12, torch 2.15). The scripted two-page browser test (21 checks) passed in Stage 6 but was not re-run in Stage 8. Details, evidence levels and the physical-device checklist: **[TESTING.md](TESTING.md)**.
+All of the above passed in the Stage 8 audit (Linux, Node 22, Python 3.12, torch 2.15). Two browser tests need Playwright + Chromium (`tests/browser/stage6_two_page.js`, 21 checks, and `tests/browser/ui_user_flow.js`, 13 checks) and also passed in Stage 8, as two headless pages on one machine. Details, evidence levels and the physical-device checklist: **[TESTING.md](TESTING.md)**.
 
 ## Benchmark summary
 

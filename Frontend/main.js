@@ -75,7 +75,11 @@ const MSG = { idle: "Create a room or join one to begin.", init: "Initialisingâ€
 function stage(st, extra) {
   S.stage = st; $("stage").dataset.state = st; $("mmStatus").textContent = extra || MSG[st];
   const busy = ["init", "waiting", "found", "establishing"].includes(st);
-  $("cancelBtn").hidden = !busy; $("panes").hidden = busy || st === "connected";
+  // The host must keep seeing the room code it has to read out to the other device (it lives inside #panes), so while
+  // waiting as host keep the panes visible but show only the code, not the Create/Join controls.
+  const hostWaiting = st === "waiting" && S.role === "A" && !!S.room;
+  $("cancelBtn").hidden = !busy; $("panes").hidden = (busy && !hostWaiting) || st === "connected";
+  $("createBtn").hidden = hostWaiting; $("panes").children[1].hidden = hostWaiting;
   $("matchBox").hidden = st !== "connected"; $("failBox").hidden = st !== "failed";
   if (st === "failed") $("failMsg").textContent = extra || MSG.failed;
 }
@@ -280,13 +284,12 @@ $("joinBtn").onclick = async () => {
   note("Joining room " + code); stage("waiting", "Joining roomâ€¦"); loadPartition("b");
   S.socket.on("error", (m) => fail(typeof m === "string" ? m : "Could not join that room."));
 };
-$("copyBtn").onclick = async () => {   // navigator.clipboard exists only in secure contexts (https or localhost), so over http://<LAN-IP> fall back to execCommand
+$("copyBtn").onclick = async () => {   // navigator.clipboard needs a secure context (https/localhost) AND permission; fall back to execCommand when it is missing or refused
   const text = S.room || "", btn = $("copyBtn");
+  const legacy = () => { const ta = document.createElement("textarea"); ta.value = text; ta.style.cssText = "position:fixed;opacity:0"; document.body.appendChild(ta); ta.select(); let r = false; try { r = document.execCommand("copy"); } catch (e) {} ta.remove(); return r; };
   let ok = false;
-  try {
-    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); ok = true; }
-    else { const ta = document.createElement("textarea"); ta.value = text; ta.style.cssText = "position:fixed;opacity:0"; document.body.appendChild(ta); ta.select(); ok = document.execCommand("copy"); ta.remove(); }
-  } catch (e) { ok = false; }
+  if (navigator.clipboard && window.isSecureContext) { try { await navigator.clipboard.writeText(text); ok = true; } catch (e) { ok = false; } }
+  if (!ok) ok = legacy();
   btn.textContent = ok ? "Copied" : "Copy failed: select the code manually"; setTimeout(() => (btn.textContent = "Copy code"), 1500);
 };
 $("cancelBtn").onclick = () => { note("Connection cancelled"); reset(); };

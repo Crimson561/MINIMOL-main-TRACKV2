@@ -24,8 +24,10 @@ Current status (`Verified` = re-run by the Stage 8 audit on 2026-11-17, Linux, N
 | `node tests/test_stage6_reliability.js` | Simulation | 24 passed, 0 failed (~15 s) | **Verified** |
 | `node tests/test_stage7_benchmarks.js` | Unit (benchmark harness) | 46 passed, 0 failed (~20 s) | **Verified** |
 | `cd room-server && npm test` | Signalling (real Socket.IO) | 15 passed, 0 failed | **Verified** (new in Stage 8) |
-| `node tests/browser/stage6_two_page.js` | Scripted browser | 21 passed, 0 failed | **Reported in Stage 6, not re-run in Stage 8** (no browser available in the audit environment) |
-| In-page `meshStage5.validate()` in two tabs | Two tabs, one computer | 27 of 27 (17 local + 10 two-device) | **Reported in Stage 5, not re-run in Stage 8** |
+| `node tests/browser/stage6_two_page.js` | Scripted browser (two headless Chromium pages, one machine) | 21 passed, 0 failed | **Verified** (Stage 8; also passed in Stage 6) |
+| `node tests/browser/ui_user_flow.js` | Browser, drives only **visible** controls like a person | 13 passed, 0 failed | **Verified** (new in Stage 8; mutation-checked: fails if the room code is hidden) |
+| Same user flow from `http://192.0.2.2:3000` (not `localhost`; `isSecureContext` = false) | Browser, one machine, non-secure origin | connect, generate "Done", Copy button OK | **Verified once, manually** (Stage 8). Approximates a phone loading the page over plain http; it is **not** a phone |
+| In-page `meshStage5.validate()` in two tabs | Two tabs, one computer | 27 of 27 (17 local + 10 two-device) | Reported in Stage 5, not re-run in Stage 8 |
 | Two physical devices | Physical | — | **NOT RUN** |
 | Firefox, Safari, mobile browsers | — | — | **NOT RUN** |
 | TURN / restrictive networks | — | — | **NOT RUN** |
@@ -63,20 +65,22 @@ Each Node test exits 0 on success and non-zero on failure. Total run time is abo
 | `test_stage7_benchmarks.js` | Statistics code and measurement wrappers (percentiles, bootstrap CI, restoring wrapped functions) |
 | `room-server/test/signalling.test.mjs` | Room create/join, 2-device limit, relay of offer/answer/ICE, dropped malformed or out-of-room signals, `peer-left`, room closure |
 | `tests/browser/stage6_two_page.js` (optional) | Two Chromium pages through the real server and a real DataChannel: connect, infer, kill channel mid-request, reconnect, tab close |
+| `tests/browser/ui_user_flow.js` (optional) | The whole user journey through visible controls: room code shown, join, both ready, enter workspace, Inference tab, generation Done, no page errors |
 
 **Numerical correctness.** The fixture was produced by PyTorch (`model/export_stage5_reference.py`). Regenerating it on a different machine in Stage 8 gave a **byte-identical** file, so the weights and reference are deterministic. JS vs PyTorch maximum differences were 9.7e-7 (activations) and 8.9e-7 (logits) in the Stage 8 benchmark gate, within the 1e-5 tolerance; JS distributed vs JS local is bit-identical.
 
-## 5. Optional: scripted browser test
+## 5. Optional: browser tests
 
-Needs Playwright with Chromium, which is **not** a project dependency:
+Need Playwright with Chromium, which is **not** a project dependency:
 
 ```bash
-npm install playwright && npx playwright install chromium     # one-off, in any folder Node can resolve it from
+npm install --no-save playwright && npx playwright install chromium   # one-off, from the repository root
 (cd room-server && npm install)
-node tests/browser/stage6_two_page.js      # starts and stops room-server itself; port 3000 must be free
+node tests/browser/ui_user_flow.js        # 13 checks; starts its own server on a spare port
+node tests/browser/stage6_two_page.js     # 21 checks; starts its own server; port 3000 must be free
 ```
 
-If Node cannot find `playwright`, install it in the repository root (`npm install --no-save playwright`) or set `NODE_PATH`. The script launches Chromium with `--disable-features=WebRtcHideLocalIpsWithMdns` so two pages on one machine can connect directly.
+`ui_user_flow.js` exists because `stage6_two_page.js` reads the app's internal state, and an internal check cannot notice a control that is in the DOM but invisible: that is exactly how a hidden room code (a real bug found in Stage 8) went unnoticed. Prefer tests that click what a user can see. Both scripts launch Chromium with `--disable-features=WebRtcHideLocalIpsWithMdns` so two pages on one machine connect directly. If Node cannot find `playwright`, install it as above or set `NODE_PATH` to a folder containing it.
 
 ## 6. Manual two-tab test (no physical devices needed)
 
@@ -84,7 +88,7 @@ If Node cannot find `playwright`, install it in the repository root (`npm instal
 2. Open `http://localhost:3000` in two tabs (or one normal and one private window).
 3. Tab 1: *Create room*. Tab 2: *Join* with the displayed `MESH-XXXXX` code.
 4. Wait until both show the pipeline as ready (each loads its own half of the weights).
-5. In tab 1 (Device A, the host) type a prompt and run. Expect a few bytes of **meaningless text**: the weights are random.
+5. On both tabs click **Enter workspace →**. In tab 1 (Device A, the host) open the **Inference** tab (the workspace opens on *Overview*), type a prompt such as `MESH` and click **Run inference**. Expect a few bytes of **meaningless text** (possibly with unprintable characters): the weights are random, and the page says so.
 6. Optional built-in diagnostics (browser developer console, once both devices are connected): `await meshTest.all()` (ping/pong and a 100 KB binary echo, from `Frontend/dc-test.js`) and `await meshStage5.validate()` (local checks plus, with a live pipeline, two-device checks; checks that cannot run are reported as SKIPPED, never as passed; from `Frontend/stage5-test.js`). These are the same helpers behind the Stage 5 "27 of 27" result and are the quickest way to collect evidence on physical devices.
 
 ## 7. Physical-device checklist (not yet run)
@@ -100,7 +104,7 @@ Do this before claiming the system works across devices. Record results in `STAG
 
 ### HTTPS and secure contexts
 
-`getUserMedia` (camera/microphone) requires HTTPS, but MINIMOL uses neither, and the WebRTC specification does not require a secure context for a DataChannel. A search of the frontend found exactly one secure-context-only API: `navigator.clipboard` in the **Copy code** button. Over plain `http://<LAN-IP>:3000` it does not exist, so the click would have thrown. Stage 8 added a fallback (`document.execCommand("copy")`, and a "Copy failed" label if that also fails). That change is **syntax-checked only, not tried in a browser**; the code is also shown on screen and can be typed in by hand.
+`getUserMedia` (camera/microphone) requires HTTPS, but MINIMOL uses neither, and the WebRTC specification does not require a secure context for a DataChannel. A search of the frontend found exactly one secure-context-only API: `navigator.clipboard` in the **Copy code** button. Over plain `http://<LAN-IP>:3000` it does not exist, so the click would have thrown. Stage 8 added a fallback (`document.execCommand("copy")`, also used when the clipboard API is refused, and a "Copy failed" label if both fail). It was checked in Chromium from both `localhost` and a non-secure `http://<ip>` origin (label changed to "Copied"); not on a phone.
 
 Whether a phone connects over plain `http://<LAN-IP>:3000` is **expected to work but unverified**. If a browser refuses something, serve over HTTPS (for example with a local certificate from `mkcert`) and open the `https://` address on both devices.
 

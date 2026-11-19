@@ -14,6 +14,8 @@ Run everything in [TESTING.md](TESTING.md#3-run-everything). All suites must pas
 python model/verify_reference.py
 for t in test_tensor test_protocol test_js_engine test_distributed_inference test_stage5_pipeline test_stage6_reliability test_stage7_benchmarks; do node tests/$t.js || break; done
 (cd room-server && npm test)
+# optional, need Playwright + Chromium (TESTING.md section 5):
+node tests/browser/ui_user_flow.js && node tests/browser/stage6_two_page.js
 ```
 
 ## Ground rules
