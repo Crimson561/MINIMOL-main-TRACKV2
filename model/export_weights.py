@@ -1,5 +1,5 @@
 """
-Model Weight Exporter for MESH Distributed AI Inference
+Model Weight Exporter for MINIMOL Distributed AI Inference
 Exports deterministically initialized weights (seed 42) into:
 - partition_a.bin: Raw FP32 binary buffer for Phone A (wte, wpe, layers 0..2)
 - partition_b.bin: Raw FP32 binary buffer for Phone B (layers 3..5, ln_f, lm_head)
@@ -11,6 +11,7 @@ import sys
 import os
 import json
 import struct
+import zlib
 import torch
 import numpy as np
 
@@ -149,6 +150,12 @@ def export_weights():
     manifest["full_model"]["parameters"] = full_params
     manifest["full_model"]["tensors"] = full_tensors
     print(f"Full Model:  {full_params:,} params, {full_bytes:,} bytes (~{full_bytes / (1024 * 1024):.2f} MB)")
+
+    # Stage 5: Adler-32 of each .bin (same algorithm as MeshProtocol.adler32). Both devices compare
+    # these, so a stale or mismatched weight file is refused instead of silently giving wrong output.
+    for part, path in (("partition_a", pa_path), ("partition_b", pb_path), ("full_model", full_path)):
+        with open(path, "rb") as f:
+            manifest[part]["checksum_adler32"] = zlib.adler32(f.read()) & 0xFFFFFFFF
 
     # Global tensors dict
     manifest["tensors"] = full_tensors

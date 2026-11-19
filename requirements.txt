@@ -1,0 +1,4 @@
+# Versions this project was verified with (Python 3.12.3): torch 2.15.0, numpy 2.5.4.
+# Older versions are untested. torch is only needed to export weights and run the PyTorch reference checks.
+torch>=2.15
+numpy>=2.0

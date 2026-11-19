@@ -1,5 +1,5 @@
 """
-Byte-Level Micro-Transformer (MESH Core Reference Model)
+Byte-Level Micro-Transformer (MINIMOL Core Reference Model)
 Architecture: GPT-style causal decoder
 Vocabulary: 256 byte values
 Context length: 512

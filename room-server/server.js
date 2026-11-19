@@ -16,7 +16,7 @@ app.use("/fixtures", express.static(path.join(__dirname, "../tests/fixtures")));
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "../Frontend/main.html"));
 });
-const port = 3000
+const port = Number(process.env.PORT) || 3000   // PORT=3101 node server.js to run on another port
 const httpServer = createServer(app)
 const io = new Server(httpServer);
 
@@ -38,16 +38,8 @@ const refuse = (ack, code, error) => respond(ack, { ok: false, code, error });
 
 
 io.on("connection", (socket) => {
-  console.log(`client connect hogya oyeeeeeeeeee: ${socket.id}`);
+  console.log(`client connected: ${socket.id}`);
 
-socket.on("ping-server", (data) => {
-  console.log(`ping server recieve hogya!! `, data);
-
-    socket.broadcast.emit("server-reply" , {
-    message: data , 
-    timestamp: Date.now()
-  });
-});
   socket.on("create-room", (_data, ack) => {
     if (socket.data.roomCode) return refuse(ack, "ALREADY_IN_ROOM", "This device is already in a room.");
     const roomCode = generateRoomCode();
@@ -117,8 +109,14 @@ socket.on("ping-server", (data) => {
 });
 
 
+httpServer.on("error", (err) => {
+    if (err.code === "EADDRINUSE") console.error(`Port ${port} is already in use. Stop the other process or choose another port, e.g. PORT=${port + 1} npm start`);
+    else console.error("Server error:", err.message);
+    process.exit(1);
+});
+
 httpServer.listen(port , "0.0.0.0",  () => {
-    console.log(`trying to make this express server work on ${port}`)
+    console.log(`MINIMOL room server listening on http://0.0.0.0:${port}`);
 });
 
 

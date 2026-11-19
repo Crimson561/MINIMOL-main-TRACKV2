@@ -20,6 +20,7 @@ const {
 } = require("../protocol/mesh_protocol");
 
 const WEIGHTS_DIR = path.join(__dirname, "..", "room-server", "public", "weights");
+if (!fs.existsSync(path.join(WEIGHTS_DIR, "weights_manifest.json"))) { console.error("Weights missing. Run: python model/export_weights.py   (see INSTALLATION.md)"); process.exit(1); }
 
 // Mock WebRTC DataChannel connection between two endpoints
 class MockDataChannel {

@@ -1,5 +1,5 @@
 /**
- * MESH Binary Protocol for WebRTC DataChannel
+ * MINIMOL Binary Protocol for WebRTC DataChannel (wire magic stays "MESH" = 0x4D455348)
  * 
  * Frame Format (48-byte header + binary payload):
  * 0..3   : Magic "MESH" (0x4D, 0x45, 0x53, 0x48)
@@ -138,11 +138,15 @@ function encodeActivation({ sessionId, seq, activations, shape, flags = 0 }) {
  * @param {number} params.token - byte value 0..255
  * @param {boolean} params.isEos
  * @param {Object} [params.timing] - execution stats
+ * @param {Float32Array} [params.logits] - optional full logits (Stage 5 validation)
  * @returns {ArrayBuffer}
  */
-function encodeToken({ sessionId, seq, token, isEos = false, timing = {} }) {
+function encodeToken({ sessionId, seq, token, isEos = false, timing = {}, logits = null }) {
   const flags = isEos ? 1 : 0;
-  const jsonStr = JSON.stringify({ token, timing });
+  // Stage 5: logits (Float32Array) are optional, sent only when Device A asked (FLAG_WANT_LOGITS). float32 -> double -> JSON -> double -> float32 is exact.
+  const body = { token, timing };
+  if (logits) body.logits = Array.from(logits);
+  const jsonStr = JSON.stringify(body);
   const encoder = new TextEncoder();
   const payloadU8 = encoder.encode(jsonStr);
   const payloadBytes = payloadU8.byteLength;
@@ -388,6 +392,144 @@ function decodeTensor(rawData, { copy = false } = {}) {
   return { data, shape: p.shape, dtype: dt.name, numel, sessionId: p.sessionId, seq: p.seq, flags: p.flags };
 }
 
+/* =============================================================================
+ * Stage 5: activation transfer helpers (additive; nothing above this line changed
+ * except encodeToken, which gained an optional `logits` field).
+ * ========================================================================== */
+
+// Flags (header bytes 6..7). Bit 0 (is_eos) already existed.
+const FLAG_WANT_LOGITS = 0x0002; // ACTIVATION: ask Device B to include the full logits in its reply (validation runs)
+
+/** Error with a stable machine-readable `code`; travels over the wire in ERROR packets. */
+class MeshError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "MeshError";
+    this.code = code;
+  }
+}
+
+/** ERROR packet (MSG_TYPES.ERROR). sessionId 0 means "could not attribute this to a request". */
+function encodeError({ sessionId = 0, seq = 0, code, message = "" }) {
+  const payloadU8 = new TextEncoder().encode(JSON.stringify({ code: String(code), message: String(message) }));
+  const buffer = new ArrayBuffer(HEADER_SIZE + payloadU8.byteLength);
+  const view = new DataView(buffer);
+  view.setUint32(0, MAGIC, false);
+  view.setUint8(4, PROTOCOL_VERSION);
+  view.setUint8(5, MSG_TYPES.ERROR);
+  view.setUint16(6, 0, false);
+  view.setBigUint64(8, BigInt(sessionId || 0), false);
+  view.setUint32(16, seq, false);
+  view.setUint8(20, DATA_TYPES.UTF8_JSON);
+  view.setUint8(21, 1);
+  view.setUint32(24, payloadU8.byteLength, false);
+  view.setUint32(40, payloadU8.byteLength, false);
+  new Uint8Array(buffer).set(payloadU8, HEADER_SIZE);
+  view.setUint32(44, adler32(new Uint8Array(buffer), HEADER_SIZE, payloadU8.byteLength), false);
+  return buffer;
+}
+
+/**
+ * Check a decoded ACTIVATION packet BEFORE any compute. decodePacket only proves the bytes
+ * arrived intact (magic, length, checksum); it does not know what an activation must look like.
+ * @returns {{T: number}} the sequence length
+ */
+function validateActivation(p, { dModel = 384, maxSeqLen = 512 } = {}) {
+  if (p.msgType !== MSG_TYPES.ACTIVATION) throw new MeshError("BAD_PACKET", `expected an ACTIVATION packet, got message type 0x${p.msgType.toString(16)}`);
+  if (p.dataType !== DATA_TYPES.FP32) throw new MeshError("BAD_DTYPE", `activation must be float32 (0x01), got dtype 0x${p.dataType.toString(16)}`);
+  if (p.rank !== 3) throw new MeshError("BAD_SHAPE", `activation must have rank 3 [1, T, ${dModel}], got rank ${p.rank}`);
+  const [b, T, d] = p.shape;
+  if (b !== 1) throw new MeshError("BAD_SHAPE", `batch dimension must be 1, got ${b}`);
+  if (d !== dModel) throw new MeshError("BAD_SHAPE", `hidden dimension must be ${dModel}, got ${d}`);
+  if (!Number.isInteger(T) || T < 1 || T > maxSeqLen) throw new MeshError("BAD_SHAPE", `sequence length must be 1..${maxSeqLen}, got ${T}`);
+  if (p.payloadLength !== T * d * 4) throw new MeshError("BAD_SHAPE", `shape [1, ${T}, ${d}] needs ${T * d * 4} payload bytes, header says ${p.payloadLength}`);
+  const x = p.payload;
+  if (!(x instanceof Float32Array) || x.length !== T * d) throw new MeshError("BAD_PACKET", "activation payload is not a Float32Array of the declared size");
+  for (let i = 0; i < x.length; i++) {
+    if (!Number.isFinite(x[i])) throw new MeshError("NON_FINITE", `activation contains NaN/Infinity at element ${i}`);
+  }
+  return { T };
+}
+
+/* ---- Chunking: DataChannel messages are capped (pc.sctp.maxMessageSize), a T=512 activation is 786,480 bytes ----
+ * A finished MESH packet is cut into slices; each slice is wrapped in a 20-byte chunk header:
+ *   0..3 "CHNK" | 4..7 messageId | 8..11 chunkIndex | 12..15 chunkCount | 16..19 totalBytes (whole packet) | payload
+ * The receiver rebuilds the EXACT original bytes, then decodePacket (checksum, validation) runs on the whole.
+ * Chunk frames start with "CHNK", which can never be mistaken for a MESH packet or for "TEST" traffic. */
+const CHUNK_MAGIC = 0x43484e4b; // "CHNK"
+const CHUNK_HEADER_SIZE = 20;
+const MAX_REASSEMBLED_BYTES = 8 * 1024 * 1024; // far above one full-context activation; bounds memory from a bad peer
+const MIN_MESSAGE_SIZE = 256;
+
+function isChunk(raw) {
+  return raw instanceof ArrayBuffer && raw.byteLength >= CHUNK_HEADER_SIZE && new DataView(raw).getUint32(0, false) === CHUNK_MAGIC;
+}
+
+/** @returns {ArrayBuffer[]} [packet] itself when it already fits, otherwise the chunk frames (each <= maxMessageSize) */
+function splitIntoChunks(packet, maxMessageSize, messageId = 0) {
+  if (!(packet instanceof ArrayBuffer)) throw new TypeError("packet must be an ArrayBuffer");
+  if (!Number.isInteger(maxMessageSize) || maxMessageSize < MIN_MESSAGE_SIZE) throw new RangeError(`maxMessageSize ${maxMessageSize} is too small`);
+  if (packet.byteLength <= maxMessageSize) return [packet];
+  if (packet.byteLength > MAX_REASSEMBLED_BYTES) throw new MeshError("TOO_LARGE", `packet of ${packet.byteLength} bytes exceeds ${MAX_REASSEMBLED_BYTES}`);
+  const per = maxMessageSize - CHUNK_HEADER_SIZE;
+  const count = Math.ceil(packet.byteLength / per);
+  const src = new Uint8Array(packet);
+  const frames = [];
+  for (let i = 0; i < count; i++) {
+    const slice = src.subarray(i * per, Math.min((i + 1) * per, src.length));
+    const frame = new ArrayBuffer(CHUNK_HEADER_SIZE + slice.length);
+    const v = new DataView(frame);
+    v.setUint32(0, CHUNK_MAGIC, false);
+    v.setUint32(4, messageId >>> 0, false);
+    v.setUint32(8, i, false);
+    v.setUint32(12, count, false);
+    v.setUint32(16, src.length, false);
+    new Uint8Array(frame).set(slice, CHUNK_HEADER_SIZE);
+    frames.push(frame);
+  }
+  return frames;
+}
+
+/** Rebuilds one packet from in-order chunk frames. Any inconsistency throws and discards the partial message. */
+class ChunkReassembler {
+  constructor({ maxBytes = MAX_REASSEMBLED_BYTES } = {}) { this.maxBytes = maxBytes; this.state = null; this.discarded = 0; this.poisonId = null; this.suppressed = 0; }
+  get inProgress() { return this.state !== null; }
+  // Stage 6: reset() drops a partial message AND forgets which broken message to ignore (used when the owner expires or disposes the transfer).
+  reset() { this.state = null; this.poisonId = null; }
+  /** @returns {ArrayBuffer|null} the complete packet on the last chunk, otherwise null */
+  push(raw) {
+    let id = null;
+    // Stage 6: remember WHICH message was broken, so its remaining frames (still in flight) are ignored instead of each raising another error.
+    const fail = (msg) => { this.state = null; if (id !== null) this.poisonId = id; throw new MeshError("BAD_CHUNK", msg); };
+    if (!isChunk(raw)) fail("not a chunk frame");
+    const v = new DataView(raw);
+    id = v.getUint32(4, false);
+    const index = v.getUint32(8, false), count = v.getUint32(12, false), total = v.getUint32(16, false);
+    if (this.poisonId === id && index !== 0) { this.suppressed++; return null; }   // leftover frame of a message we already rejected
+    if (index === 0 && this.poisonId !== null) this.poisonId = null;               // a new message begins: stop ignoring
+    const len = raw.byteLength - CHUNK_HEADER_SIZE;
+    if (count < 2 || count > 65536) fail(`invalid chunk count ${count}`);
+    if (total < 1 || total > this.maxBytes) fail(`declared total of ${total} bytes is outside 1..${this.maxBytes}`);
+    if (len < 1) fail("empty chunk");
+    if (index === 0) {
+      if (this.state) { this.discarded++; this.state = null; }   // sender abandoned the previous message (e.g. it timed out); the new one is still fully checked
+      this.state = { id, count, total, next: 0, offset: 0, buf: new Uint8Array(total) };
+    }
+    const s = this.state;
+    if (!s) fail(`chunk ${index} arrived with no message in progress`);
+    if (id !== s.id || count !== s.count || total !== s.total) fail("chunk header does not match the message in progress");
+    if (index !== s.next) fail(`chunk ${index} arrived but chunk ${s.next} was expected`);
+    if (s.offset + len > s.total) fail("chunks exceed the declared total size");
+    s.buf.set(new Uint8Array(raw, CHUNK_HEADER_SIZE, len), s.offset);
+    s.offset += len;
+    s.next++;
+    if (s.next < s.count) return null;
+    if (s.offset !== s.total) fail(`message ended with ${s.offset} of ${s.total} bytes`);
+    this.state = null;
+    return s.buf.buffer;
+  }
+}
+
 // Export for Node and Browser environments
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
@@ -406,6 +548,16 @@ if (typeof module !== "undefined" && module.exports) {
     shapeNumel,
     encodeTensor,
     decodeTensor,
+    FLAG_WANT_LOGITS,
+    MeshError,
+    encodeError,
+    validateActivation,
+    CHUNK_MAGIC,
+    CHUNK_HEADER_SIZE,
+    MAX_REASSEMBLED_BYTES,
+    isChunk,
+    splitIntoChunks,
+    ChunkReassembler,
   };
 } else if (typeof window !== "undefined") {
   window.MeshProtocol = {
@@ -424,5 +576,15 @@ if (typeof module !== "undefined" && module.exports) {
     shapeNumel,
     encodeTensor,
     decodeTensor,
+    FLAG_WANT_LOGITS,
+    MeshError,
+    encodeError,
+    validateActivation,
+    CHUNK_MAGIC,
+    CHUNK_HEADER_SIZE,
+    MAX_REASSEMBLED_BYTES,
+    isChunk,
+    splitIntoChunks,
+    ChunkReassembler,
   };
 }

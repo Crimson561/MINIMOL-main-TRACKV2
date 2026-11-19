@@ -1,0 +1,6 @@
+# Normalise line endings: LF in the repository, regardless of the contributor OS.
+* text=auto eol=lf
+*.bin binary
+*.pyc binary
+*.png binary
+*.cpuprofile binary

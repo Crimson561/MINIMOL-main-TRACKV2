@@ -1,5 +1,5 @@
 """
-Verification Script for MESH Micro-Transformer Reference Implementation
+Verification Script for MINIMOL Micro-Transformer Reference Implementation
 Validates:
 1. Exact architectural parameter count (11,040,768).
 2. Exact FP32 size (44,163,072 bytes ~ 44.16 MB).

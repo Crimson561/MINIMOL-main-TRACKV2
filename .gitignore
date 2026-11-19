@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -218,3 +218,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- MINIMOL ----
+# Dependencies
+node_modules/
+
+# Generated model weights (~88 MB). Recreate with: python model/export_weights.py (deterministic, seed 42)
+room-server/public/weights/
+
+# Profiler output (contains local absolute paths) and editor/OS files
+*.cpuprofile
+benchmarks/results/profiles/
+.DS_Store
+Thumbs.db

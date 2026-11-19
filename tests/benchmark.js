@@ -1,5 +1,5 @@
 /**
- * MESH Performance Instrumentation & Benchmark Suite
+ * MINIMOL Performance Instrumentation & Benchmark Suite
  * Generates actual measurements for:
  * - Weight loading time per device
  * - Layer execution time on Phone A (layers 0-2)
